@@ -1,0 +1,224 @@
+--- /mnt/data/v13_base_for_diff/analystarena_full_product/server.py	2026-09-08 17:14:42.000000000 +0000
++++ server.py	2026-09-09 01:19:48.335635687 +0000
+@@ -56,6 +56,7 @@
+ import sql_mutation_engine
+ import beta_ops
+ import monetization_engine
++import retention_engine
+ 
+ SKILLS = ["sql","excel","analytics","statistics","behavioral","case","bi","python"]
+ 
+@@ -909,6 +910,17 @@
+       note TEXT,
+       created_at TEXT
+     );
++    CREATE TABLE IF NOT EXISTS weekly_benchmarks(
++      session_id TEXT PRIMARY KEY,
++      application_id TEXT,
++      week_key TEXT NOT NULL,
++      started_at TEXT NOT NULL,
++      completed_at TEXT,
++      score REAL,
++      verdict TEXT,
++      skill_scores_json TEXT,
++      readiness_json TEXT
++    );
+     """)
+     def ensure_col(table, col, ddl):
+         cols={r[1] for r in con.execute(f"PRAGMA table_info({table})").fetchall()}
+@@ -1758,6 +1770,87 @@
+     role_rows=[{"role":name,"samples":x["n"],"outcomes":dict(x["outcomes"]),"topTopics":[{"topic":k,"n":v} for k,v in sorted(x["topics"].items(),key=lambda kv:-kv[1])[:6]]} for name,x in roles.items()]
+     return {"companies":sorted(comp,key=lambda x:-x["samples"]),"roles":sorted(role_rows,key=lambda x:-x["samples"]),"note":"These are your own voluntarily reported interview outcomes, not market-wide benchmarks."}
+ 
++def weekly_benchmark_rows(application_id=None):
++    con=connect_app()
++    if application_id:
++        rows=[dict(r) for r in con.execute("SELECT * FROM weekly_benchmarks WHERE application_id=? ORDER BY week_key ASC,started_at ASC",(application_id,)).fetchall()]
++    else:
++        rows=[dict(r) for r in con.execute("SELECT * FROM weekly_benchmarks ORDER BY week_key ASC,started_at ASC").fetchall()]
++    con.close();out=[]
++    for r in rows:
++        out.append({"sessionId":r.get("session_id"),"applicationId":r.get("application_id"),"weekKey":r.get("week_key"),"startedAt":r.get("started_at"),"completedAt":r.get("completed_at"),"score":r.get("score"),"verdict":r.get("verdict"),"skillScores":_safe_json(r.get("skill_scores_json"),{}),"readiness":_safe_json(r.get("readiness_json"),{})})
++    return out
++
++
++def _adherence_for_application(application_id):
++    data=study_adherence_payload()
++    return next((x for x in data.get("applications",[]) if x.get("applicationId")==application_id),{})
++
++
++def outcome_calibration_payload(application_id=None):
++    con=connect_app()
++    if application_id:
++        outcomes=[dict(r) for r in con.execute("SELECT * FROM interview_outcomes WHERE application_id=? ORDER BY created_at",(application_id,)).fetchall()]
++    else:
++        outcomes=[dict(r) for r in con.execute("SELECT * FROM interview_outcomes WHERE application_id IS NOT NULL ORDER BY created_at").fetchall()]
++    pairs=[]
++    for o in outcomes:
++        aid=o.get("application_id")
++        if not aid:continue
++        sess=con.execute("SELECT score,completed_at FROM sessions WHERE application_id=? AND completed_at IS NOT NULL AND completed_at<=? AND mode NOT IN ('diagnostic') ORDER BY completed_at DESC LIMIT 1",(aid,o.get("created_at"))).fetchone()
++        if sess and sess["score"] is not None:pairs.append({"mockScore":float(sess["score"]),"outcome":o.get("outcome"),"mockCompletedAt":sess["completed_at"],"outcomeAt":o.get("created_at")})
++    con.close();out=retention_engine.calibrate_mock_to_outcomes(pairs);out["pairs"]=pairs[-12:];return out
++
++
++def comeback_queue(application_id=None,limit=7):
++    rq=revision_queue_payload().get("items",[]);mastery=concept_mastery();heat=pressure_heatmap_payload().get("concepts",[])
++    items=[];seen=set()
++    for r in rq:
++        if not r.get("due"):continue
++        c=r.get("concept")
++        if c in seen:continue
++        seen.add(c);items.append({"type":"revision","concept":c,"skill":r.get("skill"),"priority":100,"reason":f"Due now · last score {round(float(r.get('last_score') or 0))}%"})
++    for h in sorted(heat,key=lambda x:(-(x.get("pressureDrop") or 0),x.get("realAvg") if x.get("realAvg") is not None else 999)):
++        c=h.get("name")
++        if c in seen or (h.get("pressureDrop") or 0)<8:continue
++        seen.add(c);items.append({"type":"pressure","concept":c,"skill":None,"priority":80+min(15,h.get("pressureDrop") or 0),"reason":f"Drops {h.get('pressureDrop')} points under interview pressure"})
++    for m in sorted(mastery,key=lambda x:x.get("mastery",0)):
++        c=m.get("concept")
++        if c in seen or float(m.get("mastery") or 0)>=70:continue
++        seen.add(c);items.append({"type":"weakness","concept":c,"skill":m.get("skill"),"priority":70-float(m.get("mastery") or 0)/4,"reason":f"Mastery {round(float(m.get('mastery') or 0))}%"})
++    return sorted(items,key=lambda x:-x.get("priority",0))[:limit]
++
++
++def weekly_overview(application_id=None):
++    apps=list_applications();app=None
++    if application_id:app=next((x for x in apps if x.get("applicationId")==application_id),None)
++    if not app and apps:
++        future=[]
++        today=datetime.utcnow().date()
++        for x in apps:
++            try:d=datetime.fromisoformat(str(x.get("interviewDate") or "")[:10]).date();future.append(((d-today).days,x))
++            except:pass
++        future=[x for x in future if x[0]>=0];app=(sorted(future,key=lambda x:x[0])[0][1] if future else apps[0])
++    aid=app.get("applicationId") if app else None;rows=weekly_benchmark_rows(aid);week=retention_engine.iso_week_key();current=next((x for x in reversed(rows) if x.get("weekKey")==week),None)
++    adherence=_adherence_for_application(aid) if aid else {};last=next((x for x in reversed(rows) if x.get("completedAt")),None)
++    action=retention_engine.choose_next_action(app,concept_mastery(),revision_queue_payload().get("items",[]),adherence,last)
++    trend=retention_engine.weekly_trend([x for x in rows if x.get("completedAt")])
++    con=connect_app();attempts=con.execute("SELECT COUNT(*) n FROM answers").fetchone()["n"];outcomes=con.execute("SELECT COUNT(*) n FROM interview_outcomes").fetchone()["n"];con.close()
++    confidence=retention_engine.confidence_from_evidence(attempts,outcomes,len([x for x in rows if x.get("completedAt")]))
++    return {"weekKey":week,"application":app,"currentBenchmark":current,"benchmarkDue":not bool(current and current.get("completedAt")),"trend":trend,"nextAction":action,"comebackQueue":comeback_queue(aid),"adherence":adherence,"calibration":outcome_calibration_payload(aid),"readinessConfidence":confidence,"history":rows[-10:]}
++
++
++def application_cockpit_payload():
++    apps=list_applications();global_intel=beta_ops.process_intelligence();groups=global_intel.get("groups",[]);out=[]
++    for app in apps:
++        aid=app.get("applicationId");weekly=weekly_overview(aid);match=next((g for g in groups if g.get("company","").lower()==str(app.get("companyName") or "").lower() and g.get("role","").lower()==str(app.get("roleTitle") or "").lower()),None)
++        days=None
++        try:days=(datetime.fromisoformat(str(app.get("interviewDate"))[:10]).date()-datetime.utcnow().date()).days
++        except:pass
++        out.append({"application":app,"daysToInterview":days,"weekly":weekly,"companyIntelligence":match})
++    return {"applications":out,"globalIntelligence":{"minSamples":global_intel.get("minSamples"),"reportCount":global_intel.get("reportCount"),"availableGroups":len(groups)}}
++
++
+ def debrief_reason(verdict, dimensions, skill_scores):
+     ranked=sorted(dimensions.items(),key=lambda kv:kv[1])
+     low=ranked[:2]
+@@ -1852,7 +1945,8 @@
+       "weakestConcepts":weakest,"strongestConcepts":strongest,
+       "passRate":round(100*len(pass_sessions)/len(trend)) if trend else None,
+       "practice":practices,"productEvents":{x["event_name"]:x["n"] for x in events},"realOutcomes":outcome_summary(),
+-      "pressureHeatmap":pressure_heatmap_payload(),"studyAdherence":study_adherence_payload(),"processIntelligence":process_intelligence_payload()
++      "pressureHeatmap":pressure_heatmap_payload(),"studyAdherence":study_adherence_payload(),"processIntelligence":process_intelligence_payload(),
++      "weeklyBenchmark":weekly_overview(),"outcomeCalibration":outcome_calibration_payload(),"aggregateProcessIntelligence":beta_ops.process_intelligence()
+     }
+ 
+ def _save_practice(kind,item_id,score,meta=None):
+@@ -2198,6 +2292,18 @@
+     return _cloud_safe(work)
+ 
+ 
++def mirror_weekly_cloud(session_id):
++    def work(user,token):
++        con=connect_app();r=con.execute("SELECT * FROM weekly_benchmarks WHERE session_id=?",(session_id,)).fetchone();con.close()
++        if not r:return
++        row=dict(r);cloud_auth.upsert("weekly_benchmarks",{
++            "user_id":user["id"],"session_id":_uuid_text(row.get("session_id")),"application_id":_uuid_text(row.get("application_id")) if row.get("application_id") else None,
++            "week_key":row.get("week_key"),"started_at":row.get("started_at"),"completed_at":row.get("completed_at"),"score":row.get("score"),"verdict":row.get("verdict"),
++            "skill_scores":_safe_json(row.get("skill_scores_json"),{}),"readiness":_safe_json(row.get("readiness_json"),{})
++        },token,"session_id")
++    return _cloud_safe(work)
++
++
+ def hydrate_user_cloud_once(user,token):
+     uid=user.get("id")
+     if not uid or uid in HYDRATED_USERS:return
+@@ -2211,6 +2317,7 @@
+     practices=cloud_auth.select("practice_results",token,f"{filt}&select=*&order=created_at.asc")
+     task_progress=cloud_auth.select("study_task_progress",token,f"{filt}&select=*")
+     app_events=cloud_auth.select("application_events",token,f"{filt}&select=*&order=created_at.asc")
++    weekly=cloud_auth.select("weekly_benchmarks",token,f"{filt}&select=*&order=started_at.asc")
+     con=connect_app()
+     for r in apps:
+         aid=str(r.get("id"));created=r.get("created_at") or datetime.utcnow().isoformat();updated=r.get("updated_at") or created
+@@ -2240,6 +2347,8 @@
+     for r in app_events:
+         exists=con.execute("SELECT 1 FROM application_events WHERE application_id=? AND event_type=? AND value IS ? AND created_at=?",(str(r.get("application_id")),r.get("event_type"),r.get("value"),r.get("created_at"))).fetchone()
+         if not exists:con.execute("INSERT INTO application_events(application_id,event_type,value,note,created_at) VALUES(?,?,?,?,?)",(str(r.get("application_id")),r.get("event_type"),r.get("value"),r.get("note"),r.get("created_at")))
++    for r in weekly:
++        con.execute("""INSERT INTO weekly_benchmarks(session_id,application_id,week_key,started_at,completed_at,score,verdict,skill_scores_json,readiness_json) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET completed_at=excluded.completed_at,score=excluded.score,verdict=excluded.verdict,skill_scores_json=excluded.skill_scores_json,readiness_json=excluded.readiness_json""",(str(r.get("session_id")),str(r.get("application_id")) if r.get("application_id") else None,r.get("week_key"),r.get("started_at"),r.get("completed_at"),r.get("score"),r.get("verdict"),json.dumps(r.get("skill_scores") or {}),json.dumps(r.get("readiness") or {})))
+     con.commit();con.close();HYDRATED_USERS.add(uid)
+ 
+ def account_export_payload():
+@@ -2254,6 +2363,7 @@
+       "studyProgress":[dict(r) for r in con.execute("SELECT * FROM study_task_progress ORDER BY task_date").fetchall()],
+       "practice":[dict(r) for r in con.execute("SELECT * FROM practice_results ORDER BY created_at DESC").fetchall()],
+       "outcomes":[dict(r) for r in con.execute("SELECT * FROM interview_outcomes ORDER BY created_at DESC").fetchall()],
++      "weeklyBenchmarks":[dict(r) for r in con.execute("SELECT * FROM weekly_benchmarks ORDER BY started_at DESC").fetchall()],
+     }
+     con.close();return payload
+ 
+@@ -2263,7 +2373,7 @@
+     if not user or not token:return {"error":"Sign in before deleting account data."}
+     uid=user["id"]
+     # Child tables first because of FK relationships. RLS limits each delete to the signed-in user.
+-    for table in ["study_task_progress","application_events","interview_outcomes","practice_results","concept_mastery","question_attempts","interview_sessions","applications","profiles"]:
++    for table in ["weekly_benchmarks","study_task_progress","application_events","interview_outcomes","practice_results","concept_mastery","question_attempts","interview_sessions","applications","profiles"]:
+         try: cloud_auth.delete(table,token,"user_id=eq."+urllib.parse.quote(uid,safe=""))
+         except Exception: pass
+     path=_app_db_path()
+@@ -2371,6 +2481,10 @@
+             if not CURRENT_USER.get(): return self.json_response({"error":"Sign in first."},401)
+             return self.json_response(account_export_payload())
+         if p=="/api/applications": return self.json_response({"applications":list_applications()})
++        if p=="/api/cockpit": return self.json_response(application_cockpit_payload())
++        if p=="/api/weekly/overview":
++            q=urllib.parse.parse_qs(urlparse(self.path).query);aid=(q.get("applicationId") or [None])[0];return self.json_response(weekly_overview(aid))
++        if p=="/api/intelligence/process": return self.json_response(beta_ops.process_intelligence())
+         if p=="/api/outcomes": return self.json_response(outcome_summary())
+         if p=="/api/revision/queue": return self.json_response(revision_queue_payload())
+         if p=="/api/sql/status":
+@@ -2462,6 +2576,19 @@
+         if p=="/api/study-plan/reschedule":
+             return self.json_response(reschedule_application_plan(data.get("applicationId")))
+ 
++        if p=="/api/process/report":
++            out=beta_ops.save_process_report(data,CURRENT_CLIENT.get())
++            if not out.get("error"):record_event("process_report_contributed",{"role":data.get("role"),"round":data.get("roundType"),"outcome":data.get("outcome")})
++            return self.json_response(out,400 if out.get("error") else 200)
++
++        if p=="/api/weekly/start":
++            if not self.allow_entitlement("mixed_mock",consume=True): return
++            aid=data.get("applicationId");app=next((x for x in list_applications() if x.get("applicationId")==aid),None) if aid else None
++            week=retention_engine.iso_week_key();con=connect_app();existing=con.execute("SELECT * FROM weekly_benchmarks WHERE week_key=? AND application_id IS ? ORDER BY started_at DESC LIMIT 1",(week,aid)).fetchone();con.close()
++            if existing and existing["completed_at"]:return self.json_response({"error":"This week's benchmark is already complete. Use targeted practice until next week's locked benchmark.","alreadyCompleted":True,"benchmark":dict(existing)},409)
++            cfg={"mode":"full","level":"product" if app and "product" in str(app.get("roleTitle") or "").lower() else "analyst","company":"general","companyName":app.get("companyName","") if app else "","roleTitle":app.get("roleTitle","Data Analyst") if app else "Data Analyst","jobDescription":app.get("jobDescription","") if app else "","resumeText":app.get("resumeText","") if app else "","applicationId":aid,"duration":"standard","sqlDialect":"sqlite","sqlDifficulty":"adaptive","strictness":"realistic","interviewStyle":"real","pressureProfile":"balanced","confidencePrompt":True,"weeklyBenchmark":True}
++            profile=profile_analyzer.analyze(cfg.get("resumeText",""),cfg.get("jobDescription",""),cfg.get("roleTitle","Data Analyst"),cfg.get("companyName",""));plan=job_generator.build_interview_plan(cfg,profile);profile["interviewPlan"]=plan;cfg["profileAnalysis"]=profile;cfg["interviewPlan"]=plan;qs=select_questions(cfg);sid=uuid.uuid4().hex;now=datetime.utcnow().isoformat();con=connect_app();con.execute("""INSERT INTO sessions(session_id,application_id,started_at,mode,level,company,company_name,role_title,job_description,sql_dialect,sql_difficulty,strictness,interview_style,pressure_profile,profile_analysis) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(sid,aid,now,cfg.get("mode"),cfg.get("level"),cfg.get("company"),cfg.get("companyName"),cfg.get("roleTitle"),cfg.get("jobDescription"),cfg.get("sqlDialect"),cfg.get("sqlDifficulty"),cfg.get("strictness"),cfg.get("interviewStyle"),cfg.get("pressureProfile"),json.dumps(profile)));con.execute("INSERT OR REPLACE INTO weekly_benchmarks(session_id,application_id,week_key,started_at) VALUES(?,?,?,?)",(sid,aid,week,now));con.commit();con.close();mirror_session_cloud(sid);mirror_weekly_cloud(sid);record_event("weekly_benchmark_started",{"role":cfg.get("roleTitle"),"status":"started"});return self.json_response({"sessionId":sid,"questions":[public_question(x) for x in qs],"profileAnalysis":profile,"interviewPlan":plan,"benchmark":{"weekKey":week,"applicationId":aid},"config":cfg})
++
+         if p=="/api/outcome/save":
+             return self.json_response(save_outcome(data))
+ 
+@@ -2793,6 +2920,13 @@
+             if mode_now=="diagnostic":
+                 record_event("guest_diagnostic_completed",{"score":overall,"verdict":verdict})
+                 if CURRENT_REFERRAL.get(): beta_ops.record_referral(CURRENT_REFERRAL.get(),"diagnostic_completed",CURRENT_CLIENT.get())
++            con=connect_app();wb=con.execute("SELECT session_id FROM weekly_benchmarks WHERE session_id=?",(data.get("sessionId"),)).fetchone()
++            weekly_completed=False
++            if wb:
++                rr=role_readiness(_skill_rows());con.execute("UPDATE weekly_benchmarks SET completed_at=?,score=?,verdict=?,skill_scores_json=?,readiness_json=? WHERE session_id=?",(datetime.utcnow().isoformat(),overall,verdict,json.dumps(skill_scores),json.dumps(rr),data.get("sessionId")));weekly_completed=True
++            con.commit();con.close()
++            if weekly_completed:
++                mirror_weekly_cloud(data.get("sessionId"));record_event("weekly_benchmark_completed",{"score_band":int(overall//10)*10,"outcome":verdict.lower()})
+             return self.json_response({
+               "score":overall,"verdict":verdict,"signal":signal,"threshold":threshold,
+               "skillScores":skill_scores,"weakest":weakest,"strongest":strongest,

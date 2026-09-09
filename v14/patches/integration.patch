@@ -1,0 +1,135 @@
+--- /mnt/data/v13_base_for_diff/analystarena_full_product/static/index.html	2026-09-08 17:13:20.000000000 +0000
++++ static/index.html	2026-09-09 01:21:16.949228086 +0000
+@@ -13,6 +13,7 @@
+   <link rel="stylesheet" href="/v11.css">
+   <link rel="stylesheet" href="/v12.css">
+   <link rel="stylesheet" href="/v13.css">
++  <link rel="stylesheet" href="/v14.css">
+ </head>
+ <body>
+ <div id="app">
+@@ -25,6 +26,7 @@
+       <button class="nav" data-view="practice"><span class="nav-glyph">P</span><span>Practice Lab</span></button>
+       <button class="nav" data-view="applications"><span class="nav-glyph">J</span><span>Applications</span></button>
+       <button class="nav" data-view="planner"><span class="nav-glyph">T</span><span>Study Plan</span></button>
++      <button class="nav" data-view="weekly"><span class="nav-glyph">B</span><span>Weekly Review</span></button>
+       <button class="nav" data-view="academy"><span class="nav-glyph">S</span><span>SQL Academy</span></button>
+       <button class="nav" data-view="caselab"><span class="nav-glyph">C</span><span>Case Lab</span></button>
+     </nav>
+@@ -59,6 +61,7 @@
+     <section id="view-practice" class="view hidden"></section>
+     <section id="view-applications" class="view hidden"></section>
+     <section id="view-planner" class="view hidden"></section>
++    <section id="view-weekly" class="view hidden"></section>
+     <section id="view-analytics" class="view hidden"></section>
+     <section id="view-academy" class="view hidden"></section>
+     <section id="view-weaknesses" class="view hidden"></section>
+@@ -78,5 +81,6 @@
+ <script src="/v11.js"></script>
+ <script src="/v12.js"></script>
+ <script src="/v13.js"></script>
++<script src="/v14.js"></script>
+ </body>
+ </html>
+--- /mnt/data/v13_base_for_diff/analystarena_full_product/supabase_schema.sql	2026-09-08 17:12:06.000000000 +0000
++++ supabase_schema.sql	2026-09-09 01:19:23.618391716 +0000
+@@ -224,3 +224,37 @@
+ );
+ ALTER TABLE public.billing_entitlements ENABLE ROW LEVEL SECURITY;
+ -- Intentionally no browser policy. The Python backend mirrors billing state with the service-role key.
++
++-- V14 weekly benchmark retention loop.
++CREATE TABLE IF NOT EXISTS public.weekly_benchmarks (
++  user_id uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
++  session_id uuid PRIMARY KEY REFERENCES public.interview_sessions(id) ON DELETE CASCADE,
++  application_id uuid REFERENCES public.applications(id) ON DELETE SET NULL,
++  week_key text NOT NULL,
++  started_at timestamptz NOT NULL DEFAULT now(),
++  completed_at timestamptz,
++  score numeric,
++  verdict text,
++  skill_scores jsonb DEFAULT '{}'::jsonb,
++  readiness jsonb DEFAULT '{}'::jsonb
++);
++ALTER TABLE public.weekly_benchmarks ENABLE ROW LEVEL SECURITY;
++DO $$ BEGIN
++  CREATE POLICY "weekly benchmarks own rows" ON public.weekly_benchmarks FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
++EXCEPTION WHEN duplicate_object THEN NULL; END $$;
++
++-- V14 anonymous interview-process intelligence.
++-- Server-managed only; no browser policy is created.
++CREATE TABLE IF NOT EXISTS public.process_reports (
++  report_id text PRIMARY KEY,
++  submitter_hash text,
++  company text NOT NULL,
++  role text NOT NULL,
++  round_type text,
++  outcome text,
++  difficulty text,
++  duration_bucket text,
++  topics_json jsonb DEFAULT '[]'::jsonb,
++  created_at timestamptz NOT NULL DEFAULT now()
++);
++ALTER TABLE public.process_reports ENABLE ROW LEVEL SECURITY;
+--- /mnt/data/v13_base_for_diff/analystarena_full_product/.env.example	2026-09-08 17:12:08.000000000 +0000
++++ .env.example	2026-09-09 01:24:21.847105764 +0000
+@@ -49,7 +49,7 @@
+ APP_NAME=Analyst Interview Lab
+ APP_SHORT_NAME=AIL
+ APP_TAGLINE=Realistic analyst interview practice
+-APP_VERSION=13.0-monetization
++APP_VERSION=14.0-retention-intelligence
+ # Set to 1 on a public zero-budget web deployment. This disables Docker SQL runners.
+ HOSTED_MODE=0
+ # Render/public servers usually need 0.0.0.0; local development can keep 127.0.0.1.
+@@ -102,3 +102,7 @@
+ INTERVIEW_WEEK_DAYS=10
+ REFERRAL_REWARD_HOURS=48
+ STRIPE_WEBHOOK_TOLERANCE_SECONDS=300
++
++# V14 outcome intelligence
++# A company/role aggregate is hidden until at least this many anonymous structured reports exist.
++PROCESS_INTELLIGENCE_MIN_SAMPLES=5
+--- /mnt/data/v13_base_for_diff/analystarena_full_product/roadmap_engine.py	2026-09-08 17:12:08.000000000 +0000
++++ roadmap_engine.py	2026-09-09 01:22:35.311478833 +0000
+@@ -32,7 +32,7 @@
+         "shortName": os.environ.get("APP_SHORT_NAME", "AIL"),
+         "tagline": os.environ.get("APP_TAGLINE", "Realistic analyst interview practice"),
+         "hostedMode": os.environ.get("HOSTED_MODE", "0").lower() in ("1","true","yes","on"),
+-        "version": os.environ.get("APP_VERSION", "13.0-monetization"),
++        "version": os.environ.get("APP_VERSION", "14.0-retention-intelligence"),
+     }
+ 
+ 
+--- /mnt/data/v13_base_for_diff/analystarena_full_product/ROADMAP_IMPLEMENTATION.md	2026-09-08 17:16:54.000000000 +0000
++++ ROADMAP_IMPLEMENTATION.md	2026-09-09 01:24:22.345753414 +0000
+@@ -191,3 +191,29 @@
+ 2. Webhook lifecycle survives duplicate delivery and Render restarts.
+ 3. At least a small set of real beta users completes meaningful sessions.
+ 4. Pricing is presented as an experiment; do not assume $7.99/$14.99 are proven.
++
++
++## V14 implementation update — Retention + outcome moat
++
++### Phase 3 / 4 retention loop
++- Locked weekly benchmark tied to a target application.
++- Application cockpit with countdown, next best action, comeback queue and adherence.
++- Weekly benchmark persistence through Supabase Auth/RLS.
++
++### Phase 7 calibration
++- Mock-to-real outcome pairing for the same application.
++- Readiness evidence-confidence score separate from readiness itself.
++- Personal descriptive benchmark only after enough paired outcomes; no pass-probability claim.
++
++### Phase 9 data moat
++- Optional anonymous structured process contribution.
++- Server-managed aggregate process-report store.
++- Company/role intelligence hidden below a configurable privacy threshold (default 5).
++- Evidence labels based on sample size.
++- Exact questions, answers, SQL, transcripts, resume/JD text and private notes are excluded from aggregate intelligence.
++
++Next evidence-driven depth:
++1. learn whether weekly benchmarks improve 7-day retention,
++2. calibrate company/role thresholds only with enough consented reports,
++3. add peer mocks only after individual practice retention is proven,
++4. add instructor/cohort views only after B2C usage patterns are stable.

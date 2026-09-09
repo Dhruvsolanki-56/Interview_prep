@@ -1,0 +1,91 @@
+--- /mnt/data/v13_base_for_diff/analystarena_full_product/beta_ops.py	2026-09-08 17:14:42.000000000 +0000
++++ beta_ops.py	2026-09-09 01:23:13.998768142 +0000
+@@ -1,5 +1,6 @@
+ import hashlib, json, os, re, secrets, sqlite3, urllib.parse, urllib.request, urllib.error
+ from datetime import datetime, timedelta, timezone
++import retention_engine
+ 
+ ROOT=os.path.dirname(os.path.abspath(__file__))
+ RUNTIME=os.path.join(ROOT,"runtime")
+@@ -63,6 +64,18 @@
+       page TEXT,
+       created_at TEXT NOT NULL
+     );
++    CREATE TABLE IF NOT EXISTS process_reports(
++      report_id TEXT PRIMARY KEY,
++      submitter_hash TEXT,
++      company TEXT NOT NULL,
++      role TEXT NOT NULL,
++      round_type TEXT,
++      outcome TEXT,
++      difficulty TEXT,
++      duration_bucket TEXT,
++      topics_json TEXT,
++      created_at TEXT NOT NULL
++    );
+     """)
+     con.commit();return con
+ 
+@@ -198,6 +211,50 @@
+     return {"ok":True,"feedbackId":fid,"createdAt":created}
+ 
+ 
++
++def save_process_report(data,client_id):
++    """Store only structured, non-answer interview-process data for aggregate intelligence.
++    No notes, exact questions, resume/JD text, email, transcript or SQL are accepted here.
++    """
++    company=_safe_text(data.get("company"),120);role=_safe_text(data.get("role"),120)
++    if not company or not role:return {"error":"Company and role are required for an aggregate process report."}
++    allowed_rounds={"recruiter","hiring_manager","sql","technical","excel","analytics","statistics","case","panel","take_home","final","other"}
++    allowed_outcomes={"passed","rejected","offer","withdrew","pending","advanced"}
++    allowed_diff={"easy","medium","hard","mixed","unspecified"}
++    rd=_safe_text(data.get("roundType") or "other",40).lower().replace(" ","_")
++    outcome=_safe_text(data.get("outcome") or "pending",40).lower().replace(" ","_")
++    diff=_safe_text(data.get("difficulty") or "unspecified",40).lower()
++    if rd not in allowed_rounds:rd="other"
++    if outcome not in allowed_outcomes:outcome="pending"
++    if diff not in allowed_diff:diff="unspecified"
++    dur=_safe_text(data.get("durationBucket") or "unspecified",40)
++    topics=[]
++    for x in data.get("topics") or []:
++        t=_safe_text(x,60)
++        if t and t not in topics:topics.append(t)
++        if len(topics)>=10:break
++    row={"report_id":secrets.token_hex(10),"submitter_hash":_hash_id(client_id),"company":company,"role":role,"round_type":rd,"outcome":outcome,"difficulty":diff,"duration_bucket":dur,"topics_json":json.dumps(topics),"created_at":_now()}
++    con=_conn();con.execute("INSERT INTO process_reports(report_id,submitter_hash,company,role,round_type,outcome,difficulty,duration_bucket,topics_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",tuple(row.values()));con.commit();con.close()
++    remote=dict(row);remote["topics_json"]=topics;_mirror("process_reports",remote,"report_id")
++    return {"ok":True,"reportId":row["report_id"]}
++
++def process_intelligence(min_samples=None):
++    min_samples=max(3,int(min_samples or os.environ.get("PROCESS_INTELLIGENCE_MIN_SAMPLES","5")))
++    rows=None
++    if all(_service_config().values()):
++        rows=_service_request("GET","process_reports",query="select=company,role,round_type,outcome,difficulty,duration_bucket,topics_json&limit=5000")
++    if rows is None:
++        con=_conn();rows=[dict(r) for r in con.execute("SELECT company,role,round_type,outcome,difficulty,duration_bucket,topics_json FROM process_reports ORDER BY created_at DESC LIMIT 5000").fetchall()];con.close()
++    clean=[]
++    for r in rows or []:
++        topics=r.get("topics_json") or []
++        if isinstance(topics,str):
++            try:topics=json.loads(topics)
++            except:topics=[]
++        clean.append({"company":r.get("company"),"role":r.get("role"),"round":r.get("round_type"),"outcome":r.get("outcome"),"difficulty":r.get("difficulty"),"duration":r.get("duration_bucket"),"topics":topics})
++    aggregates=retention_engine.public_process_aggregate(clean,min_samples)
++    return {"minSamples":min_samples,"groups":aggregates,"reportCount":len(clean),"note":"Only structured aggregate interview-process signals are shown, and only after the privacy threshold is met. Exact questions and candidate answers are never collected here."}
++
+ def _local_admin_summary():
+     con=_conn()
+     event_counts={r["event_name"]:r["n"] for r in con.execute("SELECT event_name,COUNT(*) n FROM beta_events GROUP BY event_name").fetchall()}
+@@ -235,7 +292,10 @@
+ 
+ def admin_summary():
+     # Prefer durable service-role mirrors when configured; otherwise use the local beta operator store.
+-    return _remote_admin_summary() or _local_admin_summary()
++    out=_remote_admin_summary() or _local_admin_summary()
++    try: out["processIntelligence"]=process_intelligence()
++    except Exception: out["processIntelligence"]={"groups":[],"reportCount":0}
++    return out
+ 
+ 
+ def launch_readiness():

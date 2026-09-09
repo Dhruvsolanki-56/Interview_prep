@@ -4,94 +4,62 @@ A realistic interview-training system for Data Analyst, Product Analyst and BI A
 
 ## Current release
 
-**V13 — Monetization & Entitlements**
+**V14 — Retention & Outcome Intelligence**
 
-V13 adds optional Stripe-ready monetization on top of the complete V12 public-beta product while keeping monetization **disabled by default**.
+V14 turns the product into a repeatable preparation loop tied to real target applications and real interview outcomes.
 
-### V13 adds
-- Interview Week one-time access pass
-- Pro monthly subscription
-- optional Founding Annual plan
-- server-side entitlement enforcement
-- Stripe-hosted Checkout and billing portal
-- verified/idempotent Stripe webhooks
-- free-tier meters for mixed mocks, advanced drills and Answer Coach
-- referral premium unlocks
-- Plans & billing UI
-- active billing signals in the private operator dashboard
-- Supabase-backed durable entitlement mirror
-- recurring-subscription safety before account deletion
+### V14 adds
+- one locked weekly benchmark per target application
+- Application Cockpit with interview countdown and next-best action
+- comeback queue driven by spaced revision, weak mastery and pressure drops
+- study-plan adherence inside the cockpit
+- personal mock → real interview outcome calibration
+- readiness evidence-confidence separate from readiness score
+- optional privacy-thresholded company/role interview-process intelligence
+- Supabase persistence for signed-in weekly benchmarks
+- operator visibility into structured process-report coverage
 
-### Existing product capabilities retained
-- generated and validated SQL interview questions
-- alternative-correct SQL grading
-- SQL Academy, debugging, optimization and robustness testing
-- Excel, statistics, dashboard/chart and business-case rounds
-- Data Investigation and take-home assignments
-- Data Modeling and Metric Design rounds
-- JD-specific interviews and three-person mock panels
+### Privacy rule for process intelligence
+The aggregate layer accepts only structured company/role/round/outcome/difficulty/duration/topic labels. It does not collect exact interview questions, candidate answers, SQL, resume/JD text, transcripts, email or private notes. Company/role groups stay hidden until `PROCESS_INTELLIGENCE_MIN_SAMPLES` is met (default 5).
+
+### Existing capabilities retained
+- generated and validated SQL interview questions with alternative-correct grading
+- SQL Academy, debugging, optimization, robustness and Explain Your Query
+- Excel, statistics, charts/dashboards, Data Modeling and Metric Design
+- Data Investigation and take-home assignment/upload grading
+- JD-specific interviews and three-person panels
 - natural voice, hands-free listening and pressure profiles
-- Answer Coach and role-readiness analytics
+- Answer Coach, role readiness and pressure heatmaps
 - Supabase-ready accounts, applications and study plans
-- beta onboarding, privacy-safe readiness sharing and referrals
-- in-product feedback and private beta operator dashboard
+- readiness sharing, referrals, feedback and beta operator dashboard
+- optional Stripe-ready Interview Week / Pro entitlements from V13
 
 ## Repository layout
 
-The V12 full packaged build remains under `releases/`.
+- `releases/` — packaged public-beta releases retained from earlier milestones
+- `v13/` — monetization and entitlements release delta
+- `v14/` — retention and outcome-intelligence release delta
 
-The V13 release delta is reviewable under:
+V14's reviewable delta contains the retention engine, UI/CSS, regression tests, server/beta-ops patches and integration/schema patch.
 
-```text
-v13/
-  V13_RELEASE_NOTES.md
-  STRIPE_BILLING_SETUP.md
-  source/
-    monetization_engine.py
-    static/v13.js
-    static/v13.css
-  tests/test_v13_monetization.py
-  patches/server.py.patch
-  patches/integration.patch
-```
+## Validation
 
-The downloadable V13 build generated from this release is named:
-
-`Analyst_Interview_Lab_V13_Monetization_Entitlements.zip`
+V14 was validated with:
+- 42 passing regression tests
+- the legacy full-product self-test
+- live HTTP weekly-benchmark flow
+- a privacy smoke test proving 4 matching process reports stay hidden and the 5th unlocks only aggregate evidence
 
 ## Run locally
 
-1. Start from the V12 packaged source or the latest assembled product tree.
-2. Apply the V13 source/integration changes.
-3. Copy `.env.example` to `.env`.
-4. Add your own API/config values locally. Never commit `.env`.
-5. Install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-6. Start:
+Use the latest assembled product tree or packaged release, copy `.env.example` to `.env`, add your own credentials locally, install requirements, then run:
 
 ```bash
 python server.py
 ```
 
-7. Open `http://localhost:8000`.
-
-## Monetization safety
-
-Payments and gating remain off unless explicitly enabled:
-
-```env
-MONETIZATION_ENABLED=0
-MONETIZATION_ENFORCED=0
-```
-
-See [`v13/STRIPE_BILLING_SETUP.md`](v13/STRIPE_BILLING_SETUP.md) before enabling Stripe.
+Never commit `.env`, API keys, Stripe secrets, Supabase service-role keys, local databases or runtime state.
 
 ## Repository policy
 
 This repository is the source-of-truth target for completed Interview Prep product releases going forward.
-
-Secrets, `.env`, local databases, runtime state, Stripe secrets and API keys must never be committed.
