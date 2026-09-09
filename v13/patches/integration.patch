@@ -1,0 +1,64 @@
+### .env.example
+@@
+-APP_VERSION=11.0-public-beta-hardening
++APP_VERSION=13.0-monetization
+@@
+ BETA_PUBLIC_STORE_PATH=
++
++# V13 monetization / Stripe. Leave disabled until your beta offer is ready.
++MONETIZATION_ENABLED=0
++MONETIZATION_ENFORCED=0
++PUBLIC_BASE_URL=
++STRIPE_SECRET_KEY=
++STRIPE_WEBHOOK_SECRET=
++STRIPE_PRICE_INTERVIEW_WEEK=
++STRIPE_PRICE_PRO_MONTHLY=
++STRIPE_PRICE_FOUNDING_ANNUAL=
++INTERVIEW_WEEK_DISPLAY_PRICE=$7.99
++PRO_MONTHLY_DISPLAY_PRICE=$14.99
++FOUNDING_ANNUAL_DISPLAY_PRICE=$49
++INTERVIEW_WEEK_DAYS=10
++REFERRAL_REWARD_HOURS=48
++STRIPE_WEBHOOK_TOLERANCE_SECONDS=300
++
++### supabase_schema.sql
+@@
+ ALTER TABLE public.beta_feedback ENABLE ROW LEVEL SECURITY;
+ -- Intentionally no browser policies: these tables are accessed through the Python backend with the service-role key.
++
++-- V13 monetization. Server-managed; never expose service-role access to the browser.
++CREATE TABLE IF NOT EXISTS public.billing_entitlements (
++  subject_hash text PRIMARY KEY,
++  plan text NOT NULL DEFAULT 'free',
++  status text NOT NULL DEFAULT 'active',
++  valid_until timestamptz,
++  source text,
++  stripe_customer_id text,
++  stripe_subscription_id text,
++  updated_at timestamptz NOT NULL DEFAULT now()
++);
++ALTER TABLE public.billing_entitlements ENABLE ROW LEVEL SECURITY;
++-- Intentionally no browser policy. The Python backend mirrors billing state with the service-role key.
++
++### static/index.html
+@@
+   <link rel="stylesheet" href="/v12.css">
++  <link rel="stylesheet" href="/v13.css">
+@@
+       <button class="nav" data-view="history"><span class="nav-glyph">H</span><span>History</span></button>
++      <button class="nav" data-view="plans"><span class="nav-glyph">$</span><span>Plans</span></button>
+       <button class="nav" data-view="account"><span class="nav-glyph">U</span><span>Account</span></button>
+@@
+     <section id="view-history" class="view hidden"></section>
++    <section id="view-plans" class="view hidden"></section>
+     <section id="view-account" class="view hidden"></section>
+@@
+ <script src="/v12.js"></script>
++<script src="/v13.js"></script>
++
++### render.yaml
+@@
+-      - key: APP_VERSION
+-        value: 12.0-beta-launch-ops
++      - key: APP_VERSION
++        value: 13.0-monetization
