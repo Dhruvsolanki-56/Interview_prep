@@ -1,0 +1,83 @@
+--- v12/server.py
++++ v13/server.py
+@@
+ import telemetry_engine
+ import sql_mutation_engine
+ import beta_ops
++import monetization_engine
+@@
++    def allow_entitlement(self,feature,consume=False):
++        state=monetization_engine.authorize(CURRENT_CLIENT.get(),feature,consume=consume,user=CURRENT_USER.get())
++        if state.get("allowed"):
++            return True
++        billing=state.get("billing") or {}
++        self.json_response({"error":"This feature is part of Interview Week / Pro.","upgradeRequired":True,"feature":feature,"reason":state.get("reason"),"billing":billing},402)
++        return False
++
++    def request_base_url(self):
++        proto=self.headers.get("X-Forwarded-Proto") or "http"
++        host=self.headers.get("X-Forwarded-Host") or self.headers.get("Host") or "localhost:8000"
++        return f"{proto}://{host}"
+@@
+-            return self.json_response({"summary":beta_ops.admin_summary(),"launchReadiness":beta_ops.launch_readiness(),"product":roadmap_engine.brand_config()})
++            return self.json_response({"summary":beta_ops.admin_summary(),"billing":monetization_engine.admin_summary(),"launchReadiness":beta_ops.launch_readiness(),"product":roadmap_engine.brand_config()})
++        if p=="/api/billing/status": return self.json_response(monetization_engine.public_status(CURRENT_CLIENT.get(),CURRENT_USER.get()))
+@@
++        if p=="/api/billing/webhook":
++            n=int(self.headers.get("Content-Length","0"));raw=self.rfile.read(n) if n else b"{}"
++            out=monetization_engine.handle_webhook(raw,self.headers.get("Stripe-Signature") or "")
++            return self.json_response({k:v for k,v in out.items() if k!="status"},int(out.get("status",200)))
+@@
++        if p=="/api/billing/checkout":
++            plan=data.get("plan") or "interview_week"
++            out=monetization_engine.checkout(CURRENT_CLIENT.get(),plan,CURRENT_USER.get(),self.request_base_url())
++            if not out.get("error"): record_event("checkout_started",{"plan":plan,"authenticated":bool(CURRENT_USER.get())})
++            return self.json_response(out,400 if out.get("error") else 200)
++        if p=="/api/billing/portal":
++            out=monetization_engine.portal(CURRENT_CLIENT.get(),self.request_base_url());return self.json_response(out,400 if out.get("error") else 200)
++        if p=="/api/billing/confirm":
++            out=monetization_engine.confirm_checkout(CURRENT_CLIENT.get(),data.get("sessionId") or "")
++            if not out.get("error"):record_event("checkout_completed",{"plan":out.get("plan"),"billing_status":"premium"})
++            return self.json_response(out,400 if out.get("error") else 200)
++        if p=="/api/billing/referral-reward":
++            out=monetization_engine.claim_referral_reward(CURRENT_CLIENT.get())
++            if not out.get("error"):record_event("referral_reward_claimed",{"plan":"referral_pass"})
++            return self.json_response(out,400 if out.get("error") else 200)
++        if p=="/api/billing/dev-grant":
++            out=monetization_engine.dev_grant(CURRENT_CLIENT.get(),data.get("plan") or "interview_week");return self.json_response(out,400 if out.get("error") else 200)
+@@
++            billing=monetization_engine.public_status(CURRENT_CLIENT.get(),CURRENT_USER.get())
++            if billing.get("premium") and billing.get("plan") in ("pro","founding_annual"):
++                return self.json_response({"error":"Cancel or manage the active recurring subscription from Plans & billing before deleting the account.","billingActive":True},409)
+@@
++            if not self.allow_entitlement("advanced_drill",consume=True): return
+@@
++            if not self.allow_entitlement("optimization"): return
+@@
++            if not self.allow_entitlement("advanced_drill",consume=True): return
+@@
++            if not self.allow_entitlement("advanced_drill",consume=True): return
+@@
++            if not self.allow_entitlement("investigation"): return
+@@
++            if not self.allow_entitlement("takehome"): return
+@@
++            if not self.allow_entitlement("data_model"): return
+@@
++            if not self.allow_entitlement("metric_design"): return
+@@
+-            if not self.allow_feature("generation"): return
+             config=data.get("config",{})
++            mode=config.get("mode") or "full"
++            if config.get("interviewDay") and not self.allow_entitlement("interview_day"): return
++            if mode=="panel" and not self.allow_entitlement("panel_interview"): return
++            if mode=="jd" and not self.allow_entitlement("jd_interview"): return
++            if mode in ("full","resume") and not self.allow_entitlement("mixed_mock",consume=True): return
++            if not self.allow_feature("generation"): return
+@@
++            if not self.allow_entitlement("answer_coach",consume=True): return
+@@
+-            if mode_now=="diagnostic": record_event("guest_diagnostic_completed",{"score":overall,"verdict":verdict})
++            if mode_now=="diagnostic":
++                record_event("guest_diagnostic_completed",{"score":overall,"verdict":verdict})
++                if CURRENT_REFERRAL.get(): beta_ops.record_referral(CURRENT_REFERRAL.get(),"diagnostic_completed",CURRENT_CLIENT.get())
